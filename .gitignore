@@ -1,0 +1,20 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+*.iml
+
+test-out/
+test-fixtures/
+
+# Signing material and machine-specific data
+signing/
+*.keystore
+*.jks
+*.p12
+*.pem
+.env
+.env.*
+*.apk
+*.aab
+*.log
