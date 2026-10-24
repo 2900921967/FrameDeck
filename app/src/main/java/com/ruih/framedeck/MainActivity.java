@@ -692,8 +692,7 @@ public final class MainActivity extends Activity {
                     detailLabel.setText(String.format(Locale.CHINA, "%d × %d  ·  %s  ·  平均 %.2f fps",
                             videoWidth, videoHeight, FrameTimeline.format(durationUs), fps));
                     showBitmap(first, frame);
-                    if (videoWidth > videoHeight)
-                        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                    // Loading media must preserve the current screen orientation.
                     fitVideo();
                     createPlayer(input, token);
                 });
