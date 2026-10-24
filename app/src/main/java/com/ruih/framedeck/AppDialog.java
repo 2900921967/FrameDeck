@@ -103,6 +103,10 @@ final class AppDialog {
                 list.setVerticalScrollBarEnabled(true);
                 MenuAdapter adapter = new MenuAdapter(context, items, descriptions, icons, icon, singleChoice, checked);
                 list.setAdapter(adapter);
+                if (singleChoice && checked >= 0 && checked < items.length) {
+                    // Apply before the first layout so the selected row opens in view.
+                    list.setSelection(checked);
+                }
                 list.setOnItemClickListener((parent, view, position, id) -> {
                     adapter.checked = position;
                     adapter.notifyDataSetChanged();
