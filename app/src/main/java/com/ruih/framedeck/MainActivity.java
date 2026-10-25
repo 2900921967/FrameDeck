@@ -94,11 +94,11 @@ public final class MainActivity extends Activity {
     private TextureView texture;
     private ImageView still;
     private FrameLayout stage;
-    private TextView fileLabel, detailLabel, clock, frameLabel, status;
+    private TextView fileLabel, detailLabel, clock, frameLabel;
     private EmptyPlayerView empty;
     private ProgressBar busy;
     private SeekBar seek;
-    private Button previous, next, play, jump, save, rate, exitFull, open, playlist;
+    private Button previousVideo, nextVideo, previous, next, play, jump, save, rate, exitFull, open, playlist;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -204,12 +204,20 @@ public final class MainActivity extends Activity {
             }
         });
         transport = row();
-        previous = button("◀  上一帧", false);
+        previousVideo = button("上个\n视频", false);
+        previousVideo.setContentDescription("上一个视频");
+        previousVideo.setOnClickListener(v -> switchPlaylistVideo(-1));
+        nextVideo = button("下个\n视频", false);
+        nextVideo.setContentDescription("下一个视频");
+        nextVideo.setOnClickListener(v -> switchPlaylistVideo(1));
+        previous = button("上一帧", false);
         play = button("播放", true);
-        next = button("下一帧  ▶", false);
+        next = button("下一帧", false);
+        addWeighted(transport, previousVideo, 48);
         addWeighted(transport, previous, 48);
         addWeighted(transport, play, 48);
         addWeighted(transport, next, 48);
+        addWeighted(transport, nextVideo, 48);
         controls.addView(transport);
         previous.setOnClickListener(v -> step(-1));
         next.setOnClickListener(v -> step(1));
@@ -237,11 +245,6 @@ public final class MainActivity extends Activity {
         rate.setOnClickListener(v -> chooseSpeed());
         jump.setOnClickListener(v -> jumpToFrame());
         save.setOnClickListener(v -> exportFrame());
-        status = label("打开视频后，轻触画面可收起控制栏", 11, 0xffa6b5ad);
-        status.setSingleLine(true);
-        status.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        controls.addView(status, new LinearLayout.LayoutParams(-1, dp(24)));
-
         // Insets protect only the overlays; the video remains edge-to-edge.
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             int left, top, right, bottom;
@@ -333,7 +336,7 @@ public final class MainActivity extends Activity {
             exportBitmap = null;
             if (result != RESULT_OK || data == null || data.getData() == null || image == null) return;
             Uri destination = data.getData();
-            status.setText(getString(R.string.saving_frame, number));
+            toast(getString(R.string.saving_frame, number));
             exporter.execute(() -> {
                 String message;
                 try (OutputStream out = getContentResolver().openOutputStream(destination, "wt")) {
@@ -377,6 +380,7 @@ public final class MainActivity extends Activity {
                     playlistUri = uri;
                     playlistName = displayName(uri);
                     rememberArchive(uri, playlistName);
+                    refreshButtons();
                     selectArchiveEntry(handle, entries, token, resumeFrame, resumeEntryOffset);
                 });
             } catch (Exception | OutOfMemoryError e) {
@@ -408,6 +412,28 @@ public final class MainActivity extends Activity {
         showArchiveEntries(playlistArchive, playlistEntries, token);
     }
 
+    private int currentPlaylistIndex() {
+        if (playlistArchive == null || !playlistArchive.uri.equals(currentUri)) return -1;
+        for (int i = 0; i < playlistEntries.size(); i++) {
+            if (playlistEntries.get(i).localOffset == currentArchiveOffset) return i;
+        }
+        return -1;
+    }
+
+    private void switchPlaylistVideo(int delta) {
+        if (destroyed || cacheBusy || timeline == null
+                || (archiveDialog != null && archiveDialog.isShowing())) return;
+        int current = currentPlaylistIndex();
+        if (current < 0) return;
+        int target = current + delta;
+        if (target < 0 || target >= playlistEntries.size()) return;
+        int token = archiveRequest.incrementAndGet();
+        pauseInternal();
+        showControls();
+        // Reuse the playlist preparation path, including cancellation and cache leases.
+        prepareArchiveVideo(playlistArchive, playlistEntries.get(target), token, 0);
+    }
+
     private void closePlaylist() {
         ArchiveSession old = playlistArchive;
         playlistArchive = null;
@@ -415,6 +441,7 @@ public final class MainActivity extends Activity {
         playlistUri = null;
         playlistName = "";
         if (old != null) old.close();
+        refreshButtons();
     }
 
     private JSONArray recentArchives() {
@@ -665,7 +692,6 @@ public final class MainActivity extends Activity {
         fileName = input.displayName;
         fileLabel.setText(fileName);
         detailLabel.setText("正在建立帧索引…");
-        status.setText("首次打开需要扫描视频轨道，长视频请稍候");
         refreshButtons();
         decoder.execute(() -> {
             if (source != null) { source.close(); source = null; }
@@ -675,7 +701,7 @@ public final class MainActivity extends Activity {
                         () -> session.get() != token,
                         progress -> ui.post(() -> {
                             if (session.get() == token && !destroyed)
-                                status.setText(getString(R.string.index_progress, progress));
+                                detailLabel.setText(getString(R.string.index_progress, progress));
                         }));
                 FrameSource loaded = source;
                 int frame = loaded.timeline.clamp(resumeFrame);
@@ -732,7 +758,6 @@ public final class MainActivity extends Activity {
                     pendingPlay = false;
                     playing = true;
                     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    status.setText("播放中 · 暂停后可精确逐帧");
                     refreshButtons();
                     ui.removeCallbacks(tick);
                     ui.post(tick);
@@ -760,7 +785,6 @@ public final class MainActivity extends Activity {
         int frame = currentFrame, token = session.get(), request = frameRequest.incrementAndGet();
         still.setVisibility(View.VISIBLE);
         busy.setVisibility(View.VISIBLE);
-        status.setText(getString(R.string.reading_frame, frame + 1));
         refreshPosition();
         refreshButtons();
         decoder.execute(() -> {
@@ -793,7 +817,6 @@ public final class MainActivity extends Activity {
         still.setImageBitmap(image);
         still.setVisibility(View.VISIBLE);
         busy.setVisibility(View.GONE);
-        status.setText("已暂停 · 按帧索引定位 · 第 1 帧为起始帧");
         refreshPosition();
         refreshButtons();
     }
@@ -814,7 +837,6 @@ public final class MainActivity extends Activity {
         busy.setVisibility(View.GONE);
         if (currentFrame == timeline.size() - 1) currentFrame = 0;
         pendingPlay = true;
-        status.setText("正在定位播放位置…");
         refreshButtons();
         try { player.seekTo(Math.max(0, timeline.timeUs(currentFrame) / 1000), MediaPlayer.SEEK_CLOSEST); }
         catch (RuntimeException e) { playbackError(errorText(e)); }
@@ -866,6 +888,9 @@ public final class MainActivity extends Activity {
     private void refreshButtons() {
         if (play == null) return;
         boolean ready = timeline != null;
+        int entry = ready && !cacheBusy ? currentPlaylistIndex() : -1;
+        previousVideo.setEnabled(entry > 0);
+        nextVideo.setEnabled(entry >= 0 && entry + 1 < playlistEntries.size());
         previous.setEnabled(ready);
         next.setEnabled(ready);
         jump.setEnabled(ready);
@@ -875,7 +900,7 @@ public final class MainActivity extends Activity {
         play.setText(playing || pendingPlay ? "暂停" : "播放");
         save.setEnabled(ready && !playing && !pendingPlay && currentBitmap != null
                 && currentFrame == displayedFrame && busy.getVisibility() != View.VISIBLE);
-        for (View view : new View[]{previous, next, jump, rate, seek, play, save})
+        for (View view : new View[]{previousVideo, nextVideo, previous, next, jump, rate, seek, play, save})
             view.setAlpha(view.isEnabled() ? 1f : 0.38f);
     }
 
@@ -962,20 +987,15 @@ public final class MainActivity extends Activity {
         boolean wide = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
         exitFull.setText(wide ? "竖屏" : "横屏");
         exitFull.setContentDescription(wide ? "切换为竖屏播放" : "切换为横屏全屏播放");
-        // A single compact button row in landscape keeps more of the video visible.
+        // Keep video/frame navigation and file actions in separate rows in both orientations.
         transport.removeAllViews();
         actions.removeAllViews();
-        previous.setText(wide ? "上一帧" : "◀  上一帧");
-        next.setText(wide ? "下一帧" : "下一帧  ▶");
-        if (wide) {
-            for (Button action : new Button[]{open, playlist, previous, play, next, rate, jump, save, exitFull})
-                addWeighted(transport, action, 48);
-        } else {
-            for (Button action : new Button[]{previous, play, next}) addWeighted(transport, action, 48);
-            for (Button action : new Button[]{open, playlist, rate, jump, save, exitFull}) addWeighted(actions, action, 48);
-        }
-        actions.setVisibility(wide ? View.GONE : View.VISIBLE);
-        status.setVisibility(wide ? View.GONE : View.VISIBLE);
+        previousVideo.setText(wide ? "上一个视频" : "上个\n视频");
+        nextVideo.setText(wide ? "下一个视频" : "下个\n视频");
+        for (Button action : new Button[]{previousVideo, previous, play, next, nextVideo})
+            addWeighted(transport, action, 48);
+        for (Button action : new Button[]{open, playlist, rate, jump, save, exitFull})
+            addWeighted(actions, action, 48);
         root.requestApplyInsets();
         root.post(this::updateEmptyFrame);
     }
@@ -1116,11 +1136,9 @@ public final class MainActivity extends Activity {
         return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
     }
     private void showError(String title, String message) {
-        status.setText(message);
         new AppDialog.Builder(this).setTitle(title).setIconKind("info").setMessage(message).setPositiveButton("知道了", null).show();
     }
     private void toast(String message) {
-        status.setText(message);
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
     private LinearLayout row() {
