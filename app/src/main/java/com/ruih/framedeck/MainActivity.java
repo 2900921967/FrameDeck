@@ -1,5 +1,6 @@
 package com.ruih.framedeck;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
@@ -24,8 +25,10 @@ import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.GestureDetector;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -40,6 +43,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.io.IOException;
@@ -86,6 +90,10 @@ public final class MainActivity extends Activity {
     private Surface playbackSurface;
     private boolean prepared, playing, pendingPlay, foreground, destroyed, dragging;
     private boolean controlsVisible = true;
+    private boolean pinnedFramesEnabled, gestureHadMultiplePointers;
+    private final VideoTransform videoTransform = new VideoTransform();
+    private ScaleGestureDetector scaleDetector;
+    private GestureDetector gestureDetector;
     private float speed = 1f;
     private AudioManager audio;
     private AudioFocusRequest focus;
@@ -93,15 +101,18 @@ public final class MainActivity extends Activity {
     private LinearLayout header, controls, transport, actions;
     private TextureView texture;
     private ImageView still;
-    private FrameLayout stage;
+    private FrameLayout stage, videoLayer;
     private TextView fileLabel, detailLabel, clock, frameLabel;
     private EmptyPlayerView empty;
     private ProgressBar busy;
     private SeekBar seek;
     private Button previousVideo, nextVideo, previous, next, play, jump, save, rate, exitFull, open, playlist;
+    private Button pinnedPrevious, pinnedNext;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        pinnedFramesEnabled = getSharedPreferences("player", MODE_PRIVATE)
+                .getBoolean("pinned_frame_controls", true);
         audio = (AudioManager) getSystemService(AUDIO_SERVICE);
         focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(new AudioAttributes.Builder()
@@ -140,12 +151,14 @@ public final class MainActivity extends Activity {
         stage = new FrameLayout(this);
         stage.setBackgroundColor(Color.BLACK);
         root.addView(stage, new FrameLayout.LayoutParams(-1, -1));
+        videoLayer = new FrameLayout(this);
+        stage.addView(videoLayer, new FrameLayout.LayoutParams(-1, -1));
         texture = new TextureView(this);
-        stage.addView(texture, new FrameLayout.LayoutParams(-1, -1));
+        videoLayer.addView(texture, new FrameLayout.LayoutParams(-1, -1));
         still = new ImageView(this);
         still.setScaleType(ImageView.ScaleType.FIT_CENTER);
         still.setBackgroundColor(Color.BLACK);
-        stage.addView(still, new FrameLayout.LayoutParams(-1, -1));
+        videoLayer.addView(still, new FrameLayout.LayoutParams(-1, -1));
         empty = new EmptyPlayerView(this);
         empty.setOnClickListener(v -> pickVideo());
         stage.addView(empty, new FrameLayout.LayoutParams(-1, -1));
@@ -155,6 +168,22 @@ public final class MainActivity extends Activity {
         stage.setOnClickListener(v -> {
             if (controlsVisible && timeline != null) hideControls(); else showControls();
         });
+        installVideoGestures();
+        videoLayer.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> fitVideo());
+
+        pinnedPrevious = button("◀ 上一帧", false);
+        pinnedPrevious.setContentDescription("上一帧（常驻按钮）");
+        pinnedPrevious.setOnClickListener(v -> step(-1, false));
+        pinnedNext = button("下一帧 ▶", false);
+        pinnedNext.setContentDescription("下一帧（常驻按钮）");
+        pinnedNext.setOnClickListener(v -> step(1, false));
+        for (Button pinned : new Button[]{pinnedPrevious, pinnedNext}) {
+            pinned.setTextSize(12);
+            pinned.setBackground(round(0xb31d2722, 12));
+            pinned.setVisibility(View.GONE);
+        }
+        root.addView(pinnedPrevious, new FrameLayout.LayoutParams(dp(104), dp(48), Gravity.BOTTOM | Gravity.START));
+        root.addView(pinnedNext, new FrameLayout.LayoutParams(dp(104), dp(48), Gravity.BOTTOM | Gravity.END));
 
         header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
@@ -166,7 +195,15 @@ public final class MainActivity extends Activity {
         fileLabel.setTypeface(null, Typeface.BOLD);
         fileLabel.setSingleLine(true);
         fileLabel.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        header.addView(fileLabel);
+        LinearLayout titleRow = row();
+        titleRow.addView(fileLabel, new LinearLayout.LayoutParams(0, dp(48), 1));
+        Button settings = button("设置", false);
+        settings.setContentDescription("播放设置");
+        settings.setOnClickListener(v -> showPlaybackSettings());
+        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(dp(56), dp(40));
+        settingsParams.setMarginStart(dp(12));
+        titleRow.addView(settings, settingsParams);
+        header.addView(titleRow);
         detailLabel = label("轻触画面隐藏或显示控制栏", 11, 0xffbbc7c0);
         header.addView(detailLabel);
         root.addView(header, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
@@ -265,6 +302,7 @@ public final class MainActivity extends Activity {
             }
             header.setPadding(dp(18) + left, dp(8) + top, dp(18) + right, dp(16));
             controls.setPadding(dp(18) + left, dp(16), dp(18) + right, dp(10) + bottom);
+            positionPinnedFrameButtons(left, right, bottom);
             return insets;
         });
         root.requestApplyInsets();
@@ -293,6 +331,103 @@ public final class MainActivity extends Activity {
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                     android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility") // Confirmed single taps call performClick below.
+    private void installVideoGestures() {
+        scaleDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override public boolean onScaleBegin(ScaleGestureDetector detector) {
+                gestureHadMultiplePointers = true;
+                return timeline != null;
+            }
+            @Override public boolean onScale(ScaleGestureDetector detector) {
+                if (timeline == null) return false;
+                videoTransform.zoomBy(detector.getScaleFactor(), detector.getFocusX(), detector.getFocusY());
+                applyVideoZoom();
+                return true;
+            }
+        });
+        scaleDetector.setQuickScaleEnabled(false);
+        gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onDown(MotionEvent event) { return true; }
+            @Override public boolean onSingleTapConfirmed(MotionEvent event) {
+                if (!destroyed && !gestureHadMultiplePointers) stage.performClick();
+                return true;
+            }
+            @Override public boolean onDoubleTap(MotionEvent event) {
+                if (!destroyed && timeline != null) resetVideoZoom();
+                return true;
+            }
+            @Override public boolean onScroll(MotionEvent first, MotionEvent current, float dx, float dy) {
+                if (timeline != null && !gestureHadMultiplePointers && !scaleDetector.isInProgress()) {
+                    videoTransform.panBy(-dx, -dy);
+                    applyVideoZoom();
+                }
+                return true;
+            }
+        });
+        gestureDetector.setIsLongpressEnabled(false);
+        stage.setOnTouchListener((v, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) gestureHadMultiplePointers = false;
+            if (event.getPointerCount() > 1) gestureHadMultiplePointers = true;
+            scaleDetector.onTouchEvent(event);
+            gestureDetector.onTouchEvent(event);
+            return true;
+        });
+    }
+
+    private void applyVideoZoom() {
+        if (videoLayer == null) return;
+        videoLayer.setPivotX(videoLayer.getWidth() / 2f);
+        videoLayer.setPivotY(videoLayer.getHeight() / 2f);
+        videoLayer.setScaleX(videoTransform.scale());
+        videoLayer.setScaleY(videoTransform.scale());
+        videoLayer.setTranslationX(videoTransform.x());
+        videoLayer.setTranslationY(videoTransform.y());
+    }
+
+    private void resetVideoZoom() { videoTransform.reset(); applyVideoZoom(); }
+
+    private void showPlaybackSettings() {
+        Switch pinned = new Switch(this);
+        pinned.setText("横屏常驻逐帧按钮");
+        pinned.setTextColor(Color.WHITE);
+        pinned.setTextSize(15);
+        pinned.setMinHeight(dp(52));
+        pinned.setPadding(dp(2), dp(8), dp(2), dp(8));
+        pinned.setChecked(pinnedFramesEnabled);
+        pinned.setOnCheckedChangeListener((button, checked) -> {
+            pinnedFramesEnabled = checked;
+            getSharedPreferences("player", MODE_PRIVATE).edit()
+                    .putBoolean("pinned_frame_controls", checked).apply();
+            updatePinnedFrameButtons();
+        });
+        new AppDialog.Builder(this).setTitle("播放设置").setIconKind("settings")
+                .setMessage("双指缩放画面，放大后可单指拖动，双击恢复原始大小。开启常驻后，横屏隐藏控制栏时仍可在左右下角逐帧查看。")
+                .setView(pinned).setNeutralButton("重置缩放", (d, which) -> resetVideoZoom())
+                .setPositiveButton("完成", null).show();
+    }
+
+    private void positionPinnedFrameButtons(int left, int right, int bottom) {
+        boolean rtl = root.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+        FrameLayout.LayoutParams prev = (FrameLayout.LayoutParams) pinnedPrevious.getLayoutParams();
+        prev.setMarginStart(dp(12) + (rtl ? right : left));
+        prev.bottomMargin = dp(12) + bottom;
+        pinnedPrevious.setLayoutParams(prev);
+        FrameLayout.LayoutParams next = (FrameLayout.LayoutParams) pinnedNext.getLayoutParams();
+        next.setMarginEnd(dp(12) + (rtl ? left : right));
+        next.bottomMargin = dp(12) + bottom;
+        pinnedNext.setLayoutParams(next);
+    }
+
+    private void updatePinnedFrameButtons() {
+        if (pinnedPrevious == null) return;
+        boolean show = pinnedFramesEnabled && !controlsVisible && timeline != null
+                && getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        for (Button button : new Button[]{pinnedPrevious, pinnedNext}) {
+            button.setVisibility(show ? View.VISIBLE : View.GONE);
+            button.setEnabled(timeline != null);
         }
     }
 
@@ -682,6 +817,7 @@ public final class MainActivity extends Activity {
         currentReadMode = input.archiveEntry == null ? "普通视频（无压缩包缓存）"
                 : input.usesVideoCache() ? "包内视频：正在使用临时视频缓存" : "包内视频：直接读取，无视频副本";
         timeline = null;
+        resetVideoZoom();
         currentFrame = 0;
         displayedFrame = -1;
         currentBitmap = null;
@@ -778,8 +914,12 @@ public final class MainActivity extends Activity {
     }
 
     private void requestFrame(int index) {
+        requestFrame(index, true);
+    }
+
+    private void requestFrame(int index, boolean revealControls) {
         if (timeline == null || destroyed) return;
-        showControls();
+        if (revealControls) showControls();
         pauseInternal();
         currentFrame = timeline.clamp(index);
         int frame = currentFrame, token = session.get(), request = frameRequest.incrementAndGet();
@@ -822,9 +962,13 @@ public final class MainActivity extends Activity {
     }
 
     private void step(int delta) {
+        step(delta, true);
+    }
+
+    private void step(int delta, boolean revealControls) {
         if (timeline == null) return;
         if (playing && player != null) currentFrame = timeline.atTime(player.getCurrentPosition() * 1000L);
-        requestFrame(currentFrame + delta);
+        requestFrame(currentFrame + delta, revealControls);
     }
 
     private void startPlayback() {
@@ -902,6 +1046,7 @@ public final class MainActivity extends Activity {
                 && currentFrame == displayedFrame && busy.getVisibility() != View.VISIBLE);
         for (View view : new View[]{previousVideo, nextVideo, previous, next, jump, rate, seek, play, save})
             view.setAlpha(view.isEnabled() ? 1f : 0.38f);
+        updatePinnedFrameButtons();
     }
 
     private void jumpToFrame() {
@@ -969,6 +1114,8 @@ public final class MainActivity extends Activity {
         matrix.setScale(fittedW / w, fittedH / h);
         matrix.postTranslate((w - fittedW) / 2, (h - fittedH) / 2);
         texture.setTransform(matrix);
+        videoTransform.setGeometry(w, h, fittedW, fittedH);
+        applyVideoZoom();
     }
 
     private void updateEmptyFrame() {
@@ -998,6 +1145,7 @@ public final class MainActivity extends Activity {
             addWeighted(actions, action, 48);
         root.requestApplyInsets();
         root.post(this::updateEmptyFrame);
+        updatePinnedFrameButtons();
     }
 
     private void applyImmersiveMode() {
@@ -1024,6 +1172,7 @@ public final class MainActivity extends Activity {
         controlsVisible = true;
         header.setVisibility(View.VISIBLE);
         controls.setVisibility(View.VISIBLE);
+        updatePinnedFrameButtons();
         scheduleControlsHide();
     }
 
@@ -1032,6 +1181,7 @@ public final class MainActivity extends Activity {
         controlsVisible = false;
         header.setVisibility(View.GONE);
         controls.setVisibility(View.GONE);
+        updatePinnedFrameButtons();
     }
 
     private void scheduleControlsHide() {

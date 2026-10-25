@@ -69,6 +69,15 @@ final class PlayerIcon extends View {
                 break;
             case "chevron":
                 paint.setColor(0xff718a7c); path(canvas, 9, 6, 15, 12, 9, 18); break;
+            case "settings":
+                canvas.drawCircle(12, 12, 6, paint);
+                canvas.drawCircle(12, 12, 2.2f, paint);
+                for (int i = 0; i < 8; i++) {
+                    double angle = Math.PI * i / 4;
+                    float x = (float) Math.cos(angle), y = (float) Math.sin(angle);
+                    canvas.drawLine(12 + 7 * x, 12 + 7 * y, 12 + 10 * x, 12 + 10 * y, paint);
+                }
+                break;
             case "info":
                 canvas.drawCircle(12, 12, 9, paint);
                 canvas.drawPoint(12, 7, paint);
